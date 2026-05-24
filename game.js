@@ -1301,6 +1301,53 @@ const STORAGE_KEYS = {
   endlessBoards: "zeroDomainDefenseNext.endlessBoards.v1",
 };
 const LEADERBOARD_LIMIT = 10;
+const SPEED_LEVELS = [0.5, 0.8, 1, 1.5, 2, 3, 4];
+const EARLY_WAVE_DELAY = 6;
+
+const TERRAIN_TYPES = {
+  high: {
+    name: "高台",
+    shortName: "高",
+    description: "建塔后射程 +15%。",
+    color: "#8bd3ff",
+    tower: { range: 1.15 },
+  },
+  power: {
+    name: "能源节点",
+    shortName: "能",
+    description: "建塔后攻击频率 +12%。",
+    color: "#f4d35e",
+    tower: { fireRate: 1.12 },
+  },
+  focus: {
+    name: "聚焦晶面",
+    shortName: "焦",
+    description: "建塔后伤害 +15%。",
+    color: "#f472b6",
+    tower: { damage: 1.15 },
+  },
+  haste: {
+    name: "加速带",
+    shortName: "速",
+    description: "敌人经过时速度 +35%。",
+    color: "#ff9f5a",
+    enemy: { speed: 1.35 },
+  },
+  armor: {
+    name: "装甲场",
+    shortName: "甲",
+    description: "敌人经过时获得 25% 减伤。",
+    color: "#f06f5f",
+    enemy: { armor: 0.25 },
+  },
+  regen: {
+    name: "再生菌毯",
+    shortName: "愈",
+    description: "敌人经过时每秒恢复少量生命。",
+    color: "#8ee05f",
+    enemy: { regen: 9 },
+  },
+};
 
 const state = {
   screen: "levelSelect",
@@ -1316,6 +1363,7 @@ const state = {
   activeWave: false,
   spawnQueue: [],
   spawnTimer: 0,
+  waveCallTimer: 0,
   enemies: [],
   towers: [],
   projectiles: [],
@@ -1333,6 +1381,7 @@ const state = {
     x: 0,
     y: 0,
   },
+  laserAimTowerId: null,
   paused: false,
   speed: 1,
   soundEnabled: true,
@@ -1445,6 +1494,10 @@ function center(cell) {
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+
+function formatSpeed(value) {
+  return `${Number(value).toFixed(1).replace(/\.0$/, "")}x`;
 }
 
 function dist(a, b) {
@@ -1796,6 +1849,16 @@ function mapPreviewSvg(map, size = "large") {
   const blocks = map.blocks
     .map(([x, y]) => `<rect x="${x * unit + 1}" y="${y * unit + 1}" width="${unit - 2}" height="${unit - 2}" rx="1.5" fill="${map.blockColor}" opacity="0.94" />`)
     .join("");
+  const terrain = terrainCellsForMap(map)
+    .map((tile) => {
+      const def = TERRAIN_TYPES[tile.type];
+      const towerTile = Boolean(def.tower);
+      return `
+        <rect x="${tile.x * unit + 1.5}" y="${tile.y * unit + 1.5}" width="${unit - 3}" height="${unit - 3}" rx="2"
+          fill="${def.color}" opacity="${towerTile ? 0.38 : 0.28}" stroke="${def.color}" stroke-width="0.9" />
+      `;
+    })
+    .join("");
   const entries = map.entries
     .map((entry, index) => `<circle cx="${entry.x * unit + unit / 2}" cy="${entry.y * unit + unit / 2}" r="${size === "small" ? 3.4 : 4.4}" fill="${pathColors[index % pathColors.length]}" stroke="#071011" stroke-width="1.2" />`)
     .join("");
@@ -1807,11 +1870,88 @@ function mapPreviewSvg(map, size = "large") {
       <path d="M0 0L${width} ${height}V0Z" fill="${backgroundB}" opacity="0.72" />
       <path d="M0 35H${width}M0 70H${width}M0 105H${width}M50 0V${height}M100 0V${height}M150 0V${height}" stroke="#ffffff" stroke-opacity="0.045" stroke-width="1" />
       ${paths}
+      ${terrain}
       ${blocks}
       <rect x="${coreX - 6}" y="${coreY - 6}" width="12" height="12" rx="2" fill="#f1fff8" stroke="#6bd39a" stroke-width="2" />
       ${entries}
     </svg>
   `;
+}
+
+function terrainCellsForMap(map = currentMap()) {
+  if (!map.terrain) map.terrain = generateMapTerrain(map);
+  return map.terrain;
+}
+
+function terrainAtCell(x, y, map = currentMap()) {
+  return terrainCellsForMap(map).find((tile) => tile.x === x && tile.y === y) || null;
+}
+
+function terrainAtPoint(x, y, map = currentMap()) {
+  return terrainAtCell(clamp(Math.floor(x / TILE), 0, COLS - 1), clamp(Math.floor(y / TILE), 0, ROWS - 1), map);
+}
+
+function generateMapTerrain(map) {
+  const blocked = blockSet(map.blocks);
+  const occupied = new Set([...blocked, key(map.core.x, map.core.y), ...map.entries.map((entry) => key(entry.x, entry.y))]);
+  const tiles = [];
+  const mapIndex = Math.max(0, MAPS.findIndex((item) => item.id === map.id));
+  const add = (type, x, y) => {
+    const cellKey = key(x, y);
+    if (!isInside(x, y) || occupied.has(cellKey)) return false;
+    tiles.push({ type, x, y });
+    occupied.add(cellKey);
+    return true;
+  };
+  const addFromCandidates = (type, candidates) => {
+    for (const candidate of candidates) {
+      if (add(type, candidate.x, candidate.y)) return;
+    }
+  };
+
+  const towerTypes = ["high", "power", "focus"];
+  const enemyTypes = ["haste", "armor", "regen"];
+  const towerAnchors = [
+    { x: 5 + (mapIndex % 4), y: 4 + (mapIndex % 3) },
+    { x: 10 + (mapIndex % 5), y: 6 + ((mapIndex + 1) % 3) },
+    { x: 14 - (mapIndex % 4), y: 9 - (mapIndex % 3) },
+  ];
+  towerTypes.forEach((type, index) => {
+    const anchor = towerAnchors[index];
+    const candidates = [];
+    for (let radius = 0; radius <= 4; radius += 1) {
+      for (let dx = -radius; dx <= radius; dx += 1) {
+        for (let dy = -radius; dy <= radius; dy += 1) {
+          if (Math.abs(dx) + Math.abs(dy) !== radius) continue;
+          candidates.push({ x: anchor.x + dx, y: anchor.y + dy });
+        }
+      }
+    }
+    addFromCandidates(type, candidates);
+  });
+
+  const pathCells = map.entries.flatMap((entry) => previewPathFor(map, entry).slice(2, -2));
+  if (!pathCells.length) {
+    for (let y = 1; y < ROWS - 1; y += 2) {
+      for (let x = 1; x < COLS - 1; x += 3) pathCells.push({ x, y });
+    }
+  }
+  enemyTypes.forEach((type, index) => {
+    const offset = Math.floor(((index + 1) * pathCells.length) / (enemyTypes.length + 1)) + mapIndex;
+    const candidates = [];
+    for (let i = 0; i < pathCells.length; i += 1) {
+      const cell = pathCells[(offset + i) % pathCells.length];
+      candidates.push(cell);
+    }
+    addFromCandidates(type, candidates);
+  });
+
+  return tiles;
+}
+
+function terrainSummary(map) {
+  const names = [...new Set(terrainCellsForMap(map).map((tile) => TERRAIN_TYPES[tile.type].name))];
+  return names.length ? names.join(" / ") : "无特殊地形";
 }
 
 function nextLevelId() {
@@ -1838,6 +1978,7 @@ function clearBattleForMapPreview() {
     activeWave: false,
     spawnQueue: [],
     spawnTimer: 0,
+    waveCallTimer: 0,
     enemies: [],
     towers: [],
     projectiles: [],
@@ -1845,6 +1986,7 @@ function clearBattleForMapPreview() {
     effects: [],
     selectedTowerId: null,
     hoverCell: null,
+    laserAimTowerId: null,
     paused: false,
     speed: 1,
     gameOver: false,
@@ -2188,6 +2330,10 @@ function placeTower(x, y) {
     angle: 0,
     cooldown: 0,
     targetId: null,
+    upgradeTimer: 0,
+    upgradeDuration: 0,
+    upgradeTargetLevel: null,
+    laserLocked: false,
   });
   state.selectedTowerId = state.towers[state.towers.length - 1].id;
   recalcEnemyPaths();
@@ -2204,6 +2350,11 @@ function selectedTower() {
 function upgradeTower() {
   const tower = selectedTower();
   if (!tower) return;
+  if (towerIsUpgrading(tower)) {
+    playSound("invalid");
+    showToast("这座炮塔正在升级");
+    return;
+  }
   if (tower.level >= 3) {
     playSound("invalid");
     showToast("这座炮塔已满级");
@@ -2216,12 +2367,17 @@ function upgradeTower() {
     return;
   }
   state.money -= cost;
-  tower.level += 1;
+  tower.upgradeTargetLevel = tower.level + 1;
+  tower.upgradeDuration = towerUpgradeDuration(tower);
+  tower.upgradeTimer = tower.upgradeDuration;
+  tower.targetId = null;
+  tower.cooldown = 0;
   uiCache.quickMenu = "";
-  addLog(`${TOWER_TYPES[tower.type].name}升级到 ${tower.level} 级。`);
-  playSound("upgrade");
+  uiCache.selected = "";
+  addLog(`${TOWER_TYPES[tower.type].name}开始升级，预计 ${tower.upgradeDuration} 秒。`);
+  playSound("build");
   pulseBoard("build");
-  showToast("炮塔已升级");
+  showToast(`升级施工中：${tower.upgradeDuration}秒`);
 }
 
 function sellTower() {
@@ -2269,29 +2425,63 @@ function auraBuffFor(towerType, auraLevel) {
   return { ...empty, ...(plans[towerType] || {}) };
 }
 
+function towerIsUpgrading(tower) {
+  return Boolean(tower?.upgradeTimer > 0);
+}
+
+function towerUpgradeDuration(tower) {
+  return tower.level === 1 ? 4 : 8;
+}
+
+function towerTerrainBoost(tower) {
+  if (!Number.isFinite(tower.x) || !Number.isFinite(tower.y)) {
+    return { range: 1, damage: 1, fireRate: 1, terrainType: null };
+  }
+  const tile = terrainAtCell(tower.x, tower.y);
+  const terrain = tile ? TERRAIN_TYPES[tile.type] : null;
+  const towerBoost = terrain?.tower || {};
+  return {
+    range: towerBoost.range || 1,
+    damage: towerBoost.damage || 1,
+    fireRate: towerBoost.fireRate || 1,
+    terrainType: towerBoost.range || towerBoost.damage || towerBoost.fireRate ? tile.type : null,
+  };
+}
+
 function towerBoost(tower) {
-  if (!tower.id || tower.type === "aura") return { range: 1, damage: 1, fireRate: 1, sourceId: null };
+  const terrain = towerTerrainBoost(tower);
+  const auraBoost = { range: 1, damage: 1, fireRate: 1, sourceId: null };
+  if (!tower.id || tower.type === "aura") {
+    return { ...terrain, sourceId: null };
+  }
   const towerCenter = center(tower);
-  const boost = { range: 1, damage: 1, fireRate: 1, sourceId: null };
   for (const aura of state.towers) {
-    if (aura.type !== "aura" || aura.id === tower.id) continue;
-    if (dist(towerCenter, center(aura)) > baseTowerRange(aura)) continue;
-    const auraBoost = auraBuffFor(tower.type, aura.level);
+    if (aura.type !== "aura" || aura.id === tower.id || towerIsUpgrading(aura)) continue;
+    const auraRange = baseTowerRange(aura) * towerTerrainBoost(aura).range;
+    if (dist(towerCenter, center(aura)) > auraRange) continue;
+    const nextBoost = auraBuffFor(tower.type, aura.level);
     let improved = false;
     for (const stat of ["range", "damage", "fireRate"]) {
-      if (auraBoost[stat] > boost[stat]) {
-        boost[stat] = auraBoost[stat];
+      if (nextBoost[stat] > auraBoost[stat]) {
+        auraBoost[stat] = nextBoost[stat];
         improved = true;
       }
     }
-    if (improved) boost.sourceId = aura.id;
+    if (improved) auraBoost.sourceId = aura.id;
   }
-  return boost;
+  return {
+    range: terrain.range * auraBoost.range,
+    damage: terrain.damage * auraBoost.damage,
+    fireRate: terrain.fireRate * auraBoost.fireRate,
+    terrainType: terrain.terrainType,
+    sourceId: auraBoost.sourceId,
+  };
 }
 
 function auraTargets(aura) {
   if (!aura || aura.type !== "aura") return [];
   const auraCenter = center(aura);
+  const auraRange = baseTowerRange(aura) * towerTerrainBoost(aura).range;
   return state.towers
     .filter((tower) => tower.type !== "aura" && tower.id !== aura.id)
     .map((tower) => ({
@@ -2300,7 +2490,7 @@ function auraTargets(aura) {
       active: towerBoost(tower).sourceId === aura.id,
       distance: dist(auraCenter, center(tower)),
     }))
-    .filter((item) => item.distance <= baseTowerRange(aura))
+    .filter((item) => item.distance <= auraRange)
     .sort((a, b) => a.distance - b.distance);
 }
 
@@ -2361,14 +2551,14 @@ function towerSlowPercent(tower) {
   return slow ? Math.round((1 - slow) * 100) : 0;
 }
 
-function prepareSpawnQueue(wave) {
+function prepareSpawnQueue(wave, offset = 0) {
   const queue = [];
   for (const pack of wave.packs) {
     for (let i = 0; i < pack.count; i += 1) {
       queue.push({
         type: pack.type,
         entry: pack.entry,
-        delay: i * pack.gap,
+        delay: offset + i * pack.gap,
       });
     }
   }
@@ -2379,20 +2569,45 @@ function prepareSpawnQueue(wave) {
 function startWave() {
   if (state.screen !== "playing") return;
   if (state.gameOver || state.won) return;
-  if (state.activeWave) {
+  const nextWave = nextWaveDefinition();
+  if (!nextWave) {
     playSound("invalid");
-    showToast("当前波次还没结束");
+    showToast("没有下一波");
     return;
   }
-  const nextWave = nextWaveDefinition();
-  if (!nextWave) return;
+  if (state.activeWave && !canCallNextWaveEarly()) {
+    playSound("invalid");
+    showToast(`还需 ${Math.ceil(nextWaveCallRemaining())} 秒才能提前呼叫`);
+    return;
+  }
+  const wasActive = state.activeWave;
   state.wave += 1;
   state.activeWave = true;
-  state.spawnQueue = prepareSpawnQueue(nextWave);
-  state.spawnTimer = 0;
+  if (!wasActive) state.spawnTimer = 0;
+  state.spawnQueue = state.spawnQueue.concat(prepareSpawnQueue(nextWave, state.spawnTimer)).sort((a, b) => a.delay - b.delay);
+  state.waveCallTimer = 0;
+  if (wasActive) {
+    const bonus = earlyWaveBonus();
+    state.money += bonus;
+    addLog(`提前呼叫第 ${state.wave} 波，压力奖励 ¥${bonus}。`);
+    showToast(`提前呼叫成功，奖励 ¥${bonus}`);
+  }
   addLog(`第 ${state.wave} 波开始：${nextWave.name}。`);
   playSound("wave");
-  showToast(`第 ${state.wave} 波：${nextWave.name}`);
+  if (!wasActive) showToast(`第 ${state.wave} 波：${nextWave.name}`);
+}
+
+function nextWaveCallRemaining() {
+  if (!state.activeWave) return 0;
+  return Math.max(0, EARLY_WAVE_DELAY - state.waveCallTimer);
+}
+
+function canCallNextWaveEarly() {
+  return state.activeWave && nextWaveDefinition() && nextWaveCallRemaining() <= 0;
+}
+
+function earlyWaveBonus() {
+  return 8 + state.wave;
 }
 
 function spawnEnemy(item) {
@@ -2443,6 +2658,7 @@ function update(dt) {
   const step = dt * state.speed;
   updateSpawns(step);
   updateEnemies(step);
+  updateTowerUpgrades(step);
   updateTowers(step);
   updateProjectiles(step);
   updateEffects(step);
@@ -2450,9 +2666,28 @@ function update(dt) {
   checkWaveEnd();
 }
 
+function updateTowerUpgrades(dt) {
+  for (const tower of state.towers) {
+    if (!towerIsUpgrading(tower)) continue;
+    tower.upgradeTimer = Math.max(0, tower.upgradeTimer - dt);
+    if (tower.upgradeTimer > 0) continue;
+    tower.level = tower.upgradeTargetLevel || tower.level;
+    tower.upgradeTargetLevel = null;
+    tower.upgradeDuration = 0;
+    tower.cooldown = 0;
+    uiCache.selected = "";
+    uiCache.quickMenu = "";
+    addLog(`${TOWER_TYPES[tower.type].name}升级完成，达到 ${tower.level} 级。`);
+    playSound("upgrade");
+    pulseBoard("build");
+    makeParticles(center(tower).x, center(tower).y, TOWER_TYPES[tower.type].color, 18);
+  }
+}
+
 function updateSpawns(dt) {
   if (!state.activeWave) return;
   state.spawnTimer += dt;
+  if (nextWaveDefinition()) state.waveCallTimer += dt;
   while (state.spawnQueue.length && state.spawnQueue[0].delay <= state.spawnTimer) {
     spawnEnemy(state.spawnQueue.shift());
   }
@@ -2460,6 +2695,10 @@ function updateSpawns(dt) {
 
 function updateEnemies(dt) {
   for (const enemy of state.enemies) {
+    const terrain = enemyTerrain(enemy);
+    if (terrain?.enemy?.regen && enemy.hp > 0) {
+      enemy.hp = Math.min(enemy.maxHp, enemy.hp + terrain.enemy.regen * dt);
+    }
     if (enemy.slowTimer > 0) {
       enemy.slowTimer -= dt;
       if (enemy.slowTimer <= 0) enemy.slowFactor = 1;
@@ -2477,7 +2716,8 @@ function updateEnemies(dt) {
     const dx = target.x - enemy.x;
     const dy = target.y - enemy.y;
     const length = Math.sqrt(dx * dx + dy * dy) || 1;
-    const move = enemy.speed * enemy.slowFactor * dt;
+    const terrainSpeed = terrain?.enemy?.speed || 1;
+    const move = enemy.speed * enemy.slowFactor * terrainSpeed * dt;
     if (move >= length) {
       enemy.x = target.x;
       enemy.y = target.y;
@@ -2512,6 +2752,11 @@ function updateEnemies(dt) {
 function updateTowers(dt) {
   for (const tower of state.towers) {
     const def = TOWER_TYPES[tower.type];
+    if (towerIsUpgrading(tower)) {
+      tower.targetId = null;
+      tower.cooldown = 0;
+      continue;
+    }
     if (def.aura) {
       tower.targetId = null;
       tower.cooldown = 0;
@@ -2527,6 +2772,15 @@ function updateTowers(dt) {
       if (!target || tower.cooldown > 0) continue;
       tower.cooldown = 1 / towerFireRate(tower);
       fireShockwave(tower);
+      continue;
+    }
+
+    if (def.laser && tower.laserLocked) {
+      const target = chooseLaserLineTarget(tower);
+      tower.targetId = target?.id || null;
+      if (!target || tower.cooldown > 0) continue;
+      tower.cooldown = 1 / towerFireRate(tower);
+      fireLaser(tower, target);
       continue;
     }
 
@@ -2585,21 +2839,38 @@ function fireTower(tower, enemy) {
   playTowerFireSound(tower.type);
 }
 
-function fireLaser(tower, target) {
+function laserLineEnemies(tower, angle = tower.angle || 0) {
   const origin = center(tower);
-  const angle = tower.angle || Math.atan2(target.y - origin.y, target.x - origin.x);
   const cos = Math.cos(angle);
   const sin = Math.sin(angle);
   const length = towerRayLength(tower);
   const width = towerBeamWidth(tower);
+  return state.enemies
+    .map((enemy) => {
+      const dx = enemy.x - origin.x;
+      const dy = enemy.y - origin.y;
+      const projection = dx * cos + dy * sin;
+      if (projection < 0 || projection > length) return null;
+      const perpendicular = Math.abs(-sin * dx + cos * dy);
+      if (perpendicular > width / 2 + enemyRadius(enemy) * 0.65) return null;
+      return { enemy, projection };
+    })
+    .filter(Boolean)
+    .sort((a, b) => pathProgress(b.enemy) - pathProgress(a.enemy));
+}
+
+function chooseLaserLineTarget(tower) {
+  const origin = center(tower);
+  return laserLineEnemies(tower).find(({ enemy }) => dist(origin, enemy) <= towerRange(tower))?.enemy || null;
+}
+
+function fireLaser(tower, target) {
+  const origin = center(tower);
+  const angle = tower.angle || Math.atan2(target.y - origin.y, target.x - origin.x);
+  const length = towerRayLength(tower);
+  const width = towerBeamWidth(tower);
   const affected = [];
-  for (const enemy of state.enemies) {
-    const dx = enemy.x - origin.x;
-    const dy = enemy.y - origin.y;
-    const projection = dx * cos + dy * sin;
-    if (projection < 0 || projection > length) continue;
-    const perpendicular = Math.abs(-sin * dx + cos * dy);
-    if (perpendicular > width / 2 + enemyRadius(enemy) * 0.65) continue;
+  for (const { enemy, projection } of laserLineEnemies(tower, angle)) {
     const falloff = 1 - (projection / length) * 0.18;
     damageEnemy(enemy, towerDamage(tower) * falloff, { pierce: false });
     affected.push(enemy.id);
@@ -2615,7 +2886,7 @@ function fireLaser(tower, target) {
     affected,
   });
   playSound("laser");
-  makeParticles(target.x, target.y, TOWER_TYPES.laser.color, 8);
+  if (target) makeParticles(target.x, target.y, TOWER_TYPES.laser.color, 8);
 }
 
 function fireShockwave(tower) {
@@ -2703,6 +2974,8 @@ function damageEnemy(enemy, damage, projectile) {
   const def = ENEMY_TYPES[enemy.type];
   let actual = damage;
   if (def.armor && !projectile.pierce) actual *= 1 - def.armor;
+  const terrain = enemyTerrain(enemy);
+  if (terrain?.enemy?.armor && !projectile.pierce) actual *= 1 - terrain.enemy.armor;
   enemy.hp -= actual;
   if (projectile.slow) {
     enemy.slowFactor = Math.min(enemy.slowFactor, projectile.slow);
@@ -2714,6 +2987,11 @@ function damageEnemy(enemy, damage, projectile) {
     state.money += enemy.reward;
     if (def.split) spawnSplit(enemy);
   }
+}
+
+function enemyTerrain(enemy) {
+  const tile = terrainAtPoint(enemy.x, enemy.y);
+  return tile ? TERRAIN_TYPES[tile.type] : null;
 }
 
 function applyStun(enemy, duration) {
@@ -2799,6 +3077,7 @@ function checkWaveEnd() {
   if (!state.activeWave) return;
   if (state.spawnQueue.length === 0 && state.enemies.length === 0) {
     state.activeWave = false;
+    state.waveCallTimer = 0;
     const bonus = isEndlessMode() ? 24 + Math.floor(state.wave * 8 + Math.min(140, state.wave * 2.2)) : 22 + state.wave * 7;
     state.money += bonus;
     addLog(`第 ${state.wave} 波结束，回收战场资源 ¥${bonus}。`);
@@ -2820,12 +3099,14 @@ function draw() {
   ctx.translate(state.shake.x, state.shake.y);
   drawBackground();
   drawPaths();
+  drawTerrain();
   drawPlacementPreviewPaths();
   drawGrid();
   drawBlocks();
   drawCoreAndEntries();
   drawPlacementRangePreview();
   drawTowers();
+  drawLaserAimPreview();
   drawEnemies();
   drawAreaEffects();
   drawProjectiles();
@@ -2858,6 +3139,36 @@ function drawGrid() {
     ctx.moveTo(0, y * TILE + 0.5);
     ctx.lineTo(COLS * TILE, y * TILE + 0.5);
     ctx.stroke();
+  }
+}
+
+function drawTerrain() {
+  for (const tile of terrainCellsForMap()) {
+    const def = TERRAIN_TYPES[tile.type];
+    const px = tile.x * TILE;
+    const py = tile.y * TILE;
+    const towerTile = Boolean(def.tower);
+    ctx.save();
+    ctx.fillStyle = def.color;
+    ctx.globalAlpha = towerTile ? 0.16 : 0.12;
+    ctx.fillRect(px + 5, py + 5, TILE - 10, TILE - 10);
+    ctx.globalAlpha = towerTile ? 0.7 : 0.58;
+    ctx.strokeStyle = def.color;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(px + 7, py + 7, TILE - 14, TILE - 14);
+    ctx.globalAlpha = 0.94;
+    ctx.fillStyle = towerTile ? "rgba(7, 15, 15, 0.72)" : "rgba(31, 12, 9, 0.68)";
+    ctx.beginPath();
+    ctx.arc(px + TILE / 2, py + TILE / 2, 13, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = def.color;
+    ctx.font = "bold 13px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(def.shortName, px + TILE / 2, py + TILE / 2 + 0.5);
+    ctx.textAlign = "left";
+    ctx.textBaseline = "alphabetic";
+    ctx.restore();
   }
 }
 
@@ -3186,10 +3497,15 @@ function drawTowers() {
       ctx.beginPath();
       ctx.arc(c.x, c.y, range, 0, Math.PI * 2);
       ctx.stroke();
+      if (tower.type === "laser" && tower.laserLocked) {
+        drawLaserPreviewLine(c, tower.angle || 0, towerRayLength(tower), towerBeamWidth(tower), TOWER_TYPES.laser.color);
+      }
     }
     drawAuraBoostMark(tower, c);
     drawTowerShell(c, def, tower.level, selected);
     drawTowerShape(c, tower, def);
+    drawLaserLockMark(tower, c);
+    drawTowerUpgradeProgress(tower, c);
     ctx.fillStyle = "#08110f";
     ctx.font = "bold 12px sans-serif";
     ctx.textAlign = "center";
@@ -3199,9 +3515,98 @@ function drawTowers() {
   }
 }
 
+function drawTowerUpgradeProgress(tower, c) {
+  if (!towerIsUpgrading(tower)) return;
+  const progress = 1 - tower.upgradeTimer / tower.upgradeDuration;
+  ctx.save();
+  ctx.fillStyle = "rgba(7, 13, 14, 0.56)";
+  ctx.beginPath();
+  ctx.arc(c.x, c.y, 30, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,0.18)";
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.arc(c.x, c.y, 29, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.strokeStyle = TOWER_TYPES[tower.type].color;
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.arc(c.x, c.y, 29, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * progress);
+  ctx.stroke();
+  ctx.fillStyle = "#eafff6";
+  ctx.font = "bold 11px sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText(`${tower.upgradeTimer.toFixed(1)}s`, c.x, c.y + 34);
+  ctx.textAlign = "left";
+  ctx.restore();
+}
+
+function drawLaserLockMark(tower, c) {
+  if (tower.type !== "laser" || !tower.laserLocked) return;
+  ctx.save();
+  ctx.fillStyle = "rgba(244, 114, 182, 0.92)";
+  ctx.strokeStyle = "#ffeefa";
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(c.x + 17, c.y - 17, 8, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = "#1a0f18";
+  ctx.font = "bold 10px sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText("锁", c.x + 17, c.y - 13);
+  ctx.textAlign = "left";
+  ctx.restore();
+}
+
+function drawLaserAimPreview() {
+  const tower = state.towers.find((item) => item.id === state.laserAimTowerId);
+  if (!tower || tower.type !== "laser" || !state.hoverCell) return;
+  const c = center(tower);
+  const target = center(state.hoverCell);
+  const angle = Math.atan2(target.y - c.y, target.x - c.x);
+  drawLaserPreviewLine(c, angle, towerRayLength(tower), towerBeamWidth(tower), TOWER_TYPES.laser.color, "点击确认锁定方向");
+}
+
+function drawLaserPreviewLine(origin, angle, length, width, color, label = "") {
+  const endX = origin.x + Math.cos(angle) * length;
+  const endY = origin.y + Math.sin(angle) * length;
+  ctx.save();
+  ctx.lineCap = "round";
+  ctx.strokeStyle = color;
+  ctx.globalAlpha = 0.18;
+  ctx.lineWidth = width;
+  ctx.beginPath();
+  ctx.moveTo(origin.x, origin.y);
+  ctx.lineTo(endX, endY);
+  ctx.stroke();
+  ctx.globalAlpha = 0.78;
+  ctx.strokeStyle = "#ffeefa";
+  ctx.lineWidth = Math.max(3, width * 0.34);
+  ctx.beginPath();
+  ctx.moveTo(origin.x, origin.y);
+  ctx.lineTo(endX, endY);
+  ctx.stroke();
+  if (label) {
+    const labelWidth = 132;
+    const labelX = clamp(origin.x + Math.cos(angle) * 64, 8, canvas.width - labelWidth - 8);
+    const labelY = clamp(origin.y + Math.sin(angle) * 64 - 18, 8, canvas.height - 30);
+    ctx.fillStyle = "rgba(31, 12, 28, 0.9)";
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = 1;
+    ctx.fillRect(labelX, labelY, labelWidth, 26);
+    ctx.strokeRect(labelX + 0.5, labelY + 0.5, labelWidth - 1, 25);
+    ctx.fillStyle = "#ffeefa";
+    ctx.font = "bold 12px sans-serif";
+    ctx.fillText(label, labelX + 8, labelY + 17);
+  }
+  ctx.restore();
+}
+
 function drawAuraFields() {
   for (const aura of state.towers) {
     if (aura.type !== "aura") continue;
+    if (towerIsUpgrading(aura)) continue;
     const c = center(aura);
     const selected = aura.id === state.selectedTowerId;
     const pulse = 0.5 + Math.sin(performance.now() / 420 + aura.x) * 0.5;
@@ -3774,6 +4179,25 @@ function drawHover() {
   ctx.lineWidth = 2;
   ctx.strokeRect(x * TILE + 4, y * TILE + 4, TILE - 8, TILE - 8);
   ctx.lineWidth = 1;
+  const terrain = terrainAtCell(x, y);
+  if (terrain) drawTerrainHoverLabel(terrain, x, y);
+}
+
+function drawTerrainHoverLabel(tile, x, y) {
+  const def = TERRAIN_TYPES[tile.type];
+  const text = `${def.name}：${def.description}`;
+  ctx.save();
+  ctx.font = "bold 12px sans-serif";
+  const width = clamp(ctx.measureText(text).width + 18, 132, 278);
+  const px = clamp(x * TILE + 12, 8, canvas.width - width - 8);
+  const py = clamp(y * TILE - 28, 8, canvas.height - 28);
+  ctx.fillStyle = "rgba(7, 13, 14, 0.9)";
+  ctx.strokeStyle = def.color;
+  ctx.fillRect(px, py, width, 25);
+  ctx.strokeRect(px + 0.5, py + 0.5, width - 1, 24);
+  ctx.fillStyle = "#eafff6";
+  ctx.fillText(text, px + 9, py + 16);
+  ctx.restore();
 }
 
 function drawOverlayMessage() {
@@ -3808,13 +4232,20 @@ function renderUi() {
   ui.money.textContent = `¥${state.money}`;
   ui.wave.textContent = `${state.wave} / ${waveGoalLabel(level)}`;
   ui.enemy.textContent = String(state.enemies.length + state.spawnQueue.length);
-  ui.speed.textContent = `${state.speed}x`;
+  ui.speed.textContent = formatSpeed(state.speed);
   ui.pause.textContent = state.paused ? "继续" : "暂停";
   ui.soundButton.textContent = state.soundEnabled ? "音效：开" : "音效：关";
   ui.soundButton.classList.toggle("is-muted", !state.soundEnabled);
   ui.levelSound.textContent = state.soundEnabled ? "音效：开" : "音效：关";
   ui.levelSound.classList.toggle("is-muted", !state.soundEnabled);
-  ui.start.disabled = state.screen !== "playing" || state.activeWave || state.gameOver || state.won;
+  const canStartAnyWave = Boolean(nextWaveDefinition());
+  ui.start.disabled = state.screen !== "playing" || state.gameOver || state.won || !canStartAnyWave || (state.activeWave && !canCallNextWaveEarly());
+  ui.start.textContent =
+    state.activeWave && canStartAnyWave
+      ? canCallNextWaveEarly()
+        ? `提前呼叫下一波 +¥${earlyWaveBonus()}`
+        : `提前呼叫 ${Math.ceil(nextWaveCallRemaining())}s`
+      : "开始下一波";
   ui.pause.disabled = state.screen !== "playing" || state.gameOver || state.won;
   ui.speedButton.disabled = state.screen !== "playing";
 
@@ -3878,6 +4309,7 @@ function renderLevelSelect() {
     <span>资金 <strong>¥${selectedLevel.money}</strong></span>
     <span>地图 <strong>${escapeHtml(selectedMap.name)}</strong></span>
     <span>入口 <strong>${selectedMap.entries.length}</strong></span>
+    <span>地形 <strong>${terrainCellsForMap(selectedMap).length}</strong></span>
   `;
   ui.selectedMapPreview.innerHTML = `
     <div class="preview-title">
@@ -3902,10 +4334,12 @@ function renderLevelSelect() {
       <h4>${escapeHtml(selectedMap.name)}</h4>
     </div>
     <p>${escapeHtml(selectedMap.description)}</p>
+    <p>${escapeHtml(terrainSummary(selectedMap))}</p>
     <div class="level-meta">
       <span>${selectedMap.entries.length} 入口</span>
       <span>核心 ${selectedMap.core.x + 1}-${selectedMap.core.y + 1}</span>
       <span>${escapeHtml(selectedMap.difficulty)}</span>
+      <span>特殊地形 ${terrainCellsForMap(selectedMap).length}</span>
       ${endless ? `<span>${escapeHtml(bestEndlessText(selectedMap.id, selectedLevel.id))}</span>` : ""}
     </div>
   `;
@@ -3959,6 +4393,7 @@ function renderLevelSelect() {
           <span>${map.entries.length} 入口</span>
           <span>核心 ${map.core.x + 1}-${map.core.y + 1}</span>
           <span>${escapeHtml(map.difficulty)}</span>
+          <span>地形 ${terrainCellsForMap(map).length}</span>
         </div>
         ${endless ? `<span class="map-record">${escapeHtml(bestEndlessText(map.id, selectedLevel.id))}</span>` : ""}
       </button>
@@ -4461,15 +4896,20 @@ function renderQuickMenu() {
 
   const def = TOWER_TYPES[tower.type];
   const cost = upgradeCost(tower);
-  const canUpgrade = tower.level < 3 && state.money >= cost;
-  const upgradeText = tower.level >= 3 ? "已满级" : `升级 ¥${cost}`;
+  const upgrading = towerIsUpgrading(tower);
+  const canUpgrade = tower.level < 3 && state.money >= cost && !upgrading;
+  const upgradeText = upgrading ? `升级中 ${tower.upgradeTimer.toFixed(1)}s` : tower.level >= 3 ? "已满级" : `升级 ¥${cost}`;
   const refund = towerSellValue(tower);
-  const keyValue = `${tower.id}:${tower.level}:${state.money}:${state.quickMenu.x}:${state.quickMenu.y}`;
+  const laserButton = tower.type === "laser"
+    ? `<button id="quickLaserLockButton">${tower.laserLocked ? "解除锁定" : "锁定朝向"}</button>`
+    : "";
+  const keyValue = `${tower.id}:${tower.level}:${state.money}:${state.quickMenu.x}:${state.quickMenu.y}:${tower.upgradeTimer?.toFixed(1)}:${tower.laserLocked}`;
 
   if (uiCache.quickMenu !== keyValue) {
     ui.quickMenu.innerHTML = `
       <div class="quick-menu-title">${def.name} Lv.${tower.level}</div>
       <button id="quickUpgradeButton" ${canUpgrade ? "" : "disabled"}>${upgradeText}</button>
+      ${laserButton}
       <button id="quickSellButton">出售 ¥${refund}</button>
     `;
     ui.quickMenu.style.left = `${state.quickMenu.x}px`;
@@ -4480,6 +4920,11 @@ function renderQuickMenu() {
       upgradeTower();
       renderQuickMenu();
     });
+    document.querySelector("#quickLaserLockButton")?.addEventListener("click", () => {
+      if (tower.laserLocked) unlockLaserTower(tower);
+      else startLaserAim(tower);
+      renderQuickMenu();
+    });
     document.querySelector("#quickSellButton")?.addEventListener("click", sellTower);
   }
 }
@@ -4488,7 +4933,7 @@ function openTowerQuickMenu(tower, event) {
   state.selectedTowerId = tower.id;
   state.quickMenu.towerId = tower.id;
   state.quickMenu.x = clamp(event.clientX, 8, window.innerWidth - 178);
-  state.quickMenu.y = clamp(event.clientY, 8, window.innerHeight - 116);
+  state.quickMenu.y = clamp(event.clientY, 8, window.innerHeight - (tower.type === "laser" ? 158 : 116));
   uiCache.quickMenu = "";
   renderQuickMenu();
 }
@@ -4497,6 +4942,22 @@ function closeQuickMenu() {
   state.quickMenu.towerId = null;
   ui.quickMenu.classList.add("hidden");
   uiCache.quickMenu = "";
+}
+
+function changeSpeed(direction, options = {}) {
+  const currentIndex = SPEED_LEVELS.findIndex((value) => value === state.speed);
+  const index = currentIndex >= 0 ? currentIndex : SPEED_LEVELS.indexOf(1);
+  const rawIndex = index + direction;
+  const nextIndex = options.cycle
+    ? (rawIndex + SPEED_LEVELS.length) % SPEED_LEVELS.length
+    : clamp(rawIndex, 0, SPEED_LEVELS.length - 1);
+  if (nextIndex === index) {
+    playSound("invalid");
+    return;
+  }
+  state.speed = SPEED_LEVELS[nextIndex];
+  playSound("select");
+  showToast(`速度：${formatSpeed(state.speed)}`);
 }
 
 function formatBoost(boost) {
@@ -4530,6 +4991,7 @@ function selectedTowerSpecialLines(tower) {
     return `
       <span>射线 <strong>${Math.round(towerRayLength(tower))}</strong></span>
       <span>光束宽度 <strong>${Math.round(towerBeamWidth(tower))}</strong></span>
+      <span>朝向模式 <strong>${tower.laserLocked ? "锁定" : "自动"}</strong></span>
     `;
   }
   if (def.shockwave) {
@@ -4577,6 +5039,7 @@ function renderSelectedCard() {
   if (tower) {
     const def = TOWER_TYPES[tower.type];
     const cost = upgradeCost(tower);
+    const upgrading = towerIsUpgrading(tower);
     const range = Math.round(towerRange(tower));
     const rangeLabel = def.aura ? "光环" : def.laser ? "索敌" : "射程";
     const boost = towerBoost(tower);
@@ -4596,8 +5059,17 @@ function renderSelectedCard() {
       ? `<span>光环加成 <strong>${formatBoost(boost)}</strong></span>
         <span>加成来源 <strong>${TOWER_TYPES[sourceAura.type].name} ${towerGridLabel(sourceAura)}</strong></span>`
       : "";
+    const terrainLine = boost.terrainType
+      ? `<span>地形加成 <strong>${TERRAIN_TYPES[boost.terrainType].name} ${formatBoost(towerTerrainBoost(tower))}</strong></span>`
+      : "";
     const auraList = def.aura ? renderAuraTargetList(tower) : "";
-    const keyValue = `tower:${tower.id}:${tower.level}:${state.money}:${boost.range}:${boost.damage}:${boost.fireRate}:${auraTargets(tower).map((item) => `${item.tower.id}:${item.active}`).join(",")}`;
+    const laserAction = tower.type === "laser"
+      ? `<button id="laserLockButton">${tower.laserLocked ? "解除锁定" : "锁定朝向"}</button>`
+      : "";
+    const upgradeStatus = upgrading
+      ? `<span>升级中 <strong>${tower.upgradeTimer.toFixed(1)}s</strong></span>`
+      : `<span>升级 <strong>${tower.level >= 3 ? "满级" : `¥${cost}`}</strong></span>`;
+    const keyValue = `tower:${tower.id}:${tower.level}:${state.money}:${boost.range}:${boost.damage}:${boost.fireRate}:${tower.upgradeTimer?.toFixed(1)}:${tower.laserLocked}:${auraTargets(tower).map((item) => `${item.tower.id}:${item.active}`).join(",")}`;
     const html = `
       <h2>已选炮塔</h2>
       <p><span class="tower-name">${def.name}</span>，等级 ${tower.level}。${def.text}</p>
@@ -4607,10 +5079,12 @@ function renderSelectedCard() {
         ${combatLines}
         ${specialLines}
         ${boostLine}
-        <span>升级 <strong>${tower.level >= 3 ? "满级" : `¥${cost}`}</strong></span>
+        ${terrainLine}
+        ${upgradeStatus}
       </div>
       <div class="tower-actions">
-        <button id="upgradeTowerButton"${tower.level >= 3 ? " disabled" : ""}>升级</button>
+        <button id="upgradeTowerButton"${tower.level >= 3 || upgrading ? " disabled" : ""}>升级</button>
+        ${laserAction}
         <button id="sellTowerButton">出售</button>
       </div>
       ${auraList}
@@ -4619,6 +5093,10 @@ function renderSelectedCard() {
       ui.selected.innerHTML = html;
       uiCache.selected = keyValue;
       document.querySelector("#upgradeTowerButton")?.addEventListener("click", upgradeTower);
+      document.querySelector("#laserLockButton")?.addEventListener("click", () => {
+        if (tower.laserLocked) unlockLaserTower(tower);
+        else startLaserAim(tower);
+      });
       document.querySelector("#sellTowerButton")?.addEventListener("click", sellTower);
     }
     return;
@@ -4736,6 +5214,60 @@ function cellFromEvent(event) {
   return { x, y };
 }
 
+function pointFromEvent(event) {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  return {
+    x: (event.clientX - rect.left) * scaleX,
+    y: (event.clientY - rect.top) * scaleY,
+  };
+}
+
+function confirmLaserAim(event) {
+  const tower = state.towers.find((item) => item.id === state.laserAimTowerId);
+  if (!tower || tower.type !== "laser") {
+    state.laserAimTowerId = null;
+    return false;
+  }
+  const point = pointFromEvent(event);
+  const c = center(tower);
+  const dx = point.x - c.x;
+  const dy = point.y - c.y;
+  if (Math.sqrt(dx * dx + dy * dy) < 12) {
+    playSound("invalid");
+    showToast("向塔外点击以确认激光方向");
+    return true;
+  }
+  tower.angle = Math.atan2(dy, dx);
+  tower.laserLocked = true;
+  state.laserAimTowerId = null;
+  uiCache.selected = "";
+  playSound("select");
+  showToast("激光塔已锁定朝向");
+  return true;
+}
+
+function startLaserAim(tower) {
+  if (!tower || tower.type !== "laser") return;
+  state.selectedTowerId = tower.id;
+  state.laserAimTowerId = tower.id;
+  closeQuickMenu();
+  uiCache.selected = "";
+  playSound("select");
+  showToast("移动鼠标预览射线，左键确认方向");
+}
+
+function unlockLaserTower(tower) {
+  if (!tower || tower.type !== "laser") return;
+  tower.laserLocked = false;
+  state.laserAimTowerId = state.laserAimTowerId === tower.id ? null : state.laserAimTowerId;
+  uiCache.selected = "";
+  uiCache.quickMenu = "";
+  playSound("select");
+  showToast("激光塔已恢复自动索敌");
+}
+
 canvas.addEventListener("mousemove", (event) => {
   if (state.screen !== "playing") return;
   state.hoverCell = cellFromEvent(event);
@@ -4748,6 +5280,11 @@ canvas.addEventListener("mouseleave", () => {
 canvas.addEventListener("contextmenu", (event) => {
   event.preventDefault();
   if (state.screen !== "playing") return;
+  if (state.laserAimTowerId) {
+    state.laserAimTowerId = null;
+    showToast("已取消激光锁定");
+    return;
+  }
   const cell = cellFromEvent(event);
   const existing = towerAt(cell.x, cell.y);
   if (existing) {
@@ -4761,6 +5298,7 @@ canvas.addEventListener("contextmenu", (event) => {
 canvas.addEventListener("click", (event) => {
   if (state.screen !== "playing") return;
   if (state.gameOver || state.won) return;
+  if (state.laserAimTowerId && confirmLaserAim(event)) return;
   closeQuickMenu();
   const cell = cellFromEvent(event);
   const existing = towerAt(cell.x, cell.y);
@@ -4772,11 +5310,19 @@ canvas.addEventListener("click", (event) => {
   placeTower(cell.x, cell.y);
 });
 
+canvas.addEventListener("dblclick", (event) => {
+  if (state.screen !== "playing" || state.gameOver || state.won) return;
+  const cell = cellFromEvent(event);
+  const existing = towerAt(cell.x, cell.y);
+  if (existing?.type === "laser") startLaserAim(existing);
+});
+
 document.querySelectorAll(".tower-button").forEach((button) => {
   button.addEventListener("click", () => {
     if (state.screen !== "playing") return;
     state.selectedTowerType = button.dataset.tower;
     state.selectedTowerId = null;
+    state.laserAimTowerId = null;
     closeQuickMenu();
     playSound("select");
     showToast(`已选择：${TOWER_TYPES[state.selectedTowerType].name}`);
@@ -4791,9 +5337,7 @@ ui.pause.addEventListener("click", () => {
 });
 ui.speedButton.addEventListener("click", () => {
   if (state.screen !== "playing") return;
-  state.speed = state.speed === 1 ? 2 : state.speed === 2 ? 3 : 1;
-  playSound("select");
-  showToast(`速度：${state.speed}x`);
+  changeSpeed(1, { cycle: true });
 });
 ui.soundButton.addEventListener("click", toggleSound);
 ui.codexButton.addEventListener("click", () => openCodex("towers"));
@@ -4851,6 +5395,14 @@ window.addEventListener("keydown", (event) => {
     return;
   }
   if (state.screen !== "playing") return;
+  if (event.key === "+" || event.key === "=" || event.code === "Equal" || event.code === "NumpadAdd") {
+    changeSpeed(1);
+    return;
+  }
+  if (event.key === "-" || event.key === "_" || event.code === "Minus" || event.code === "NumpadSubtract") {
+    changeSpeed(-1);
+    return;
+  }
   const towerIndex = Number(event.key) - 1;
   if (towerIndex >= 0 && towerIndex < TOWER_ORDER.length) {
     const type = TOWER_ORDER[towerIndex];
@@ -4976,6 +5528,7 @@ function startLevel(levelId, options = {}) {
       x: 0,
       y: 0,
     },
+    laserAimTowerId: null,
     hoverCell: null,
     paused: false,
     speed: 1,
