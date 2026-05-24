@@ -1280,11 +1280,36 @@ const LEVELS = [
   },
 ];
 
+const GAME_MODES = {
+  campaign: {
+    id: "campaign",
+    name: "普通防守",
+    badge: "固定波次",
+    description: "按所选强度完成固定波次，适合熟悉地图、路线和炮塔节奏。",
+  },
+  endless: {
+    id: "endless",
+    name: "无尽挑战",
+    badge: "本地榜",
+    description: "敌人会持续增强，失守后按最高波数写入当前地图的本地前十榜。",
+  },
+};
+
+const GAME_MODE_ORDER = ["campaign", "endless"];
+const STORAGE_KEYS = {
+  playerName: "zeroDomainDefenseNext.playerName.v1",
+  endlessBoards: "zeroDomainDefenseNext.endlessBoards.v1",
+};
+const LEADERBOARD_LIMIT = 10;
+
 const state = {
   screen: "levelSelect",
   entryStep: "difficulty",
+  gameMode: "campaign",
   levelId: "standard",
   mapId: "plain",
+  playerName: loadPlayerName(),
+  leaderboardVersion: 0,
   lives: 20,
   money: 180,
   wave: 0,
@@ -1324,6 +1349,7 @@ const state = {
   won: false,
   kills: 0,
   leaks: 0,
+  endlessResult: null,
   startedAt: performance.now(),
   endedAt: null,
   lastTime: performance.now(),
@@ -1349,6 +1375,7 @@ const ui = {
   levelSelectButton: document.querySelector("#levelSelectButton"),
   reset: document.querySelector("#resetButton"),
   levelSelect: document.querySelector("#levelSelectOverlay"),
+  modeCards: document.querySelector("#modeCards"),
   levelCards: document.querySelector("#levelCards"),
   mapCards: document.querySelector("#mapCards"),
   difficultyStep: document.querySelector("#difficultyStep"),
@@ -1359,7 +1386,10 @@ const ui = {
   entryStepButtons: document.querySelectorAll("[data-entry-step]"),
   startSelected: document.querySelector("#startSelectedButton"),
   selectedLoadout: document.querySelector("#selectedLoadout"),
+  endlessNamePanel: document.querySelector("#endlessNamePanel"),
+  playerNameInput: document.querySelector("#playerNameInput"),
   selectedMapPreview: document.querySelector("#selectedMapPreview"),
+  confirmLeaderboard: document.querySelector("#confirmLeaderboard"),
   mapSpotlight: document.querySelector("#mapSpotlight"),
   skipTutorial: document.querySelector("#skipTutorialButton"),
   levelSound: document.querySelector("#levelSoundButton"),
@@ -1370,6 +1400,7 @@ const ui = {
   settlementTitle: document.querySelector("#settlementTitle"),
   settlementSummary: document.querySelector("#settlementSummary"),
   settlementStats: document.querySelector("#settlementStats"),
+  settlementLeaderboard: document.querySelector("#settlementLeaderboard"),
   settlementRetry: document.querySelector("#settlementRetryButton"),
   settlementNext: document.querySelector("#settlementNextButton"),
   settlementSelect: document.querySelector("#settlementSelectButton"),
@@ -1452,6 +1483,247 @@ function currentMap() {
 
 function currentWaves() {
   return currentLevel().waves;
+}
+
+function currentMode() {
+  return GAME_MODES[state.gameMode] || GAME_MODES.campaign;
+}
+
+function isEndlessMode() {
+  return state.gameMode === "endless";
+}
+
+function playableLevels() {
+  return isEndlessMode() ? LEVELS.filter((level) => level.id !== "tutorial") : LEVELS;
+}
+
+function waveGoalLabel(level = currentLevel()) {
+  return isEndlessMode() ? "∞" : String(level.waves.length);
+}
+
+function resolveEntryIndex(index) {
+  if (!ENTRIES.length) return 0;
+  const value = Number.isFinite(index) ? index : 0;
+  return ((value % ENTRIES.length) + ENTRIES.length) % ENTRIES.length;
+}
+
+function waveDefinitionFor(number) {
+  if (isEndlessMode()) return endlessWaveDefinition(number);
+  return currentWaves()[number - 1] || null;
+}
+
+function nextWaveDefinition() {
+  return waveDefinitionFor(state.wave + 1);
+}
+
+function endlessWaveDefinition(number) {
+  const baseWaves = currentWaves().length ? currentWaves() : WAVES;
+  const base = baseWaves[(number - 1) % baseWaves.length];
+  const cycle = Math.floor((number - 1) / baseWaves.length);
+  const stage = Math.floor((number - 1) / 5);
+  const countMultiplier = 1 + cycle * 0.2 + stage * 0.045;
+  const gapMultiplier = Math.max(0.52, 1 - cycle * 0.045);
+  const packs = base.packs.map((pack, index) => ({
+    type: pack.type,
+    count: Math.ceil(pack.count * countMultiplier),
+    gap: Math.max(0.2, Number((pack.gap * gapMultiplier).toFixed(2))),
+    entry: resolveEntryIndex(pack.entry + cycle + index),
+  }));
+
+  if (number % 5 === 0) {
+    packs.push({
+      type: number % 10 === 0 ? "boss" : "armor",
+      count: number % 10 === 0 ? 1 + Math.floor(number / 40) : 4 + Math.floor(number / 5),
+      gap: number % 10 === 0 ? 0.95 : 0.62,
+      entry: resolveEntryIndex(number / 5),
+    });
+  }
+  if (number >= 12 && number % 7 === 0) {
+    packs.push({
+      type: "split",
+      count: 4 + Math.floor(number / 7),
+      gap: 0.54,
+      entry: resolveEntryIndex(number / 7 + 1),
+    });
+  }
+
+  return {
+    name: `${base.name} / 无尽 ${number}`,
+    packs,
+  };
+}
+
+function battleSeconds() {
+  return Math.max(0, Math.round(((state.endedAt || performance.now()) - state.startedAt) / 1000));
+}
+
+function battleScore() {
+  if (isEndlessMode()) {
+    return Math.max(
+      0,
+      Math.round(state.wave * 1000 + state.kills * 22 + battleSeconds() * 3 + state.lives * 55 + state.money * 0.7 - state.leaks * 45),
+    );
+  }
+  return Math.max(
+    0,
+    Math.round(state.wave * 120 + state.kills * 18 + state.lives * 45 + state.money + (state.won ? 520 : 0) - state.leaks * 35),
+  );
+}
+
+function normalizePlayerName(value) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 12);
+}
+
+function loadPlayerName() {
+  try {
+    return normalizePlayerName(localStorage.getItem(STORAGE_KEYS.playerName));
+  } catch {
+    return "";
+  }
+}
+
+function savePlayerName(name) {
+  try {
+    if (name) localStorage.setItem(STORAGE_KEYS.playerName, name);
+    else localStorage.removeItem(STORAGE_KEYS.playerName);
+  } catch {
+    // 本地存储不可用时仍允许游玩，只是不保留昵称。
+  }
+}
+
+function commitPlayerName(options = {}) {
+  const raw = ui.playerNameInput ? ui.playerNameInput.value : state.playerName;
+  const name = normalizePlayerName(raw);
+  if (options.require && name.length < 2) {
+    playSound("invalid");
+    showToast("无尽挑战需要先填写 2-12 字昵称");
+    ui.playerNameInput?.focus();
+    return null;
+  }
+  state.playerName = name || "守塔者";
+  savePlayerName(state.playerName);
+  if (ui.playerNameInput) ui.playerNameInput.value = state.playerName;
+  return state.playerName;
+}
+
+function loadEndlessBoards() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(STORAGE_KEYS.endlessBoards) || "{}");
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveEndlessBoards(boards) {
+  try {
+    localStorage.setItem(STORAGE_KEYS.endlessBoards, JSON.stringify(boards));
+  } catch {
+    showToast("本地排行榜保存失败，可能是浏览器限制了本地存储");
+  }
+}
+
+function endlessLeaderboardKey(mapId = state.mapId, levelId = state.levelId) {
+  return `${mapId}:${levelId}`;
+}
+
+function compareEndlessEntries(a, b) {
+  return (
+    b.wave - a.wave ||
+    b.score - a.score ||
+    b.seconds - a.seconds ||
+    b.lives - a.lives ||
+    b.money - a.money ||
+    (a.createdAt || 0) - (b.createdAt || 0)
+  );
+}
+
+function getEndlessLeaderboard(mapId = state.mapId, levelId = state.levelId) {
+  const boards = loadEndlessBoards();
+  const keyName = endlessLeaderboardKey(mapId, levelId);
+  return Array.isArray(boards[keyName]) ? boards[keyName].slice().sort(compareEndlessEntries).slice(0, LEADERBOARD_LIMIT) : [];
+}
+
+function saveEndlessLeaderboard(mapId, levelId, board) {
+  const boards = loadEndlessBoards();
+  boards[endlessLeaderboardKey(mapId, levelId)] = board.slice(0, LEADERBOARD_LIMIT);
+  saveEndlessBoards(boards);
+  state.leaderboardVersion += 1;
+}
+
+function recordEndlessScore() {
+  const name = commitPlayerName({ require: false }) || "守塔者";
+  const entry = {
+    id: crypto.randomUUID(),
+    name,
+    mapId: state.mapId,
+    levelId: state.levelId,
+    wave: state.wave,
+    score: battleScore(),
+    seconds: battleSeconds(),
+    lives: state.lives,
+    money: state.money,
+    kills: state.kills,
+    leaks: state.leaks,
+    towers: state.towers.length,
+    createdAt: Date.now(),
+  };
+  const previous = getEndlessLeaderboard(state.mapId, state.levelId);
+  const ranked = previous.concat(entry).sort(compareEndlessEntries);
+  const rank = ranked.findIndex((item) => item.id === entry.id) + 1;
+  const board = ranked.slice(0, LEADERBOARD_LIMIT);
+  saveEndlessLeaderboard(state.mapId, state.levelId, board);
+  return {
+    entry,
+    rank,
+    madeBoard: rank > 0 && rank <= LEADERBOARD_LIMIT,
+    previousBest: previous[0] || null,
+    board,
+  };
+}
+
+function leaderboardTitle(mapId = state.mapId, levelId = state.levelId) {
+  return `${mapById(mapId).name} / ${levelById(levelId).name}`;
+}
+
+function leaderboardHtml(board, options = {}) {
+  const rows = board
+    .map((entry, index) => {
+      const isCurrent = entry.id && entry.id === options.currentId;
+      return `
+        <div class="leaderboard-row${isCurrent ? " is-current" : ""}">
+          <span>${index + 1}</span>
+          <strong>${escapeHtml(entry.name)}</strong>
+          <em>${entry.wave} 波</em>
+          <b>${entry.score}</b>
+          <i>${formatDuration(entry.seconds * 1000)}</i>
+        </div>
+      `;
+    })
+    .join("");
+  return `
+    <div class="leaderboard-heading">
+      <div>
+        <span class="screen-kicker">无尽榜</span>
+        <strong>${escapeHtml(options.title || leaderboardTitle())}</strong>
+      </div>
+      <small>本地前十</small>
+    </div>
+    <div class="leaderboard-header">
+      <span>#</span><span>昵称</span><span>波次</span><span>评分</span><span>用时</span>
+    </div>
+    <div class="leaderboard-list">
+      ${rows || `<p class="leaderboard-empty">暂无记录，第一局会写在这里。</p>`}
+    </div>
+  `;
+}
+
+function bestEndlessText(mapId, levelId = state.levelId) {
+  const best = getEndlessLeaderboard(mapId, levelId)[0];
+  return best ? `最佳 ${best.wave} 波` : "暂无无尽记录";
 }
 
 function escapeHtml(value) {
@@ -1579,6 +1851,7 @@ function clearBattleForMapPreview() {
     won: false,
     kills: 0,
     leaks: 0,
+    endlessResult: null,
     endedAt: null,
     logs: [],
   });
@@ -2111,19 +2384,19 @@ function startWave() {
     showToast("当前波次还没结束");
     return;
   }
-  const waves = currentWaves();
-  if (state.wave >= waves.length) return;
+  const nextWave = nextWaveDefinition();
+  if (!nextWave) return;
   state.wave += 1;
   state.activeWave = true;
-  state.spawnQueue = prepareSpawnQueue(waves[state.wave - 1]);
+  state.spawnQueue = prepareSpawnQueue(nextWave);
   state.spawnTimer = 0;
-  addLog(`第 ${state.wave} 波开始：${waves[state.wave - 1].name}。`);
+  addLog(`第 ${state.wave} 波开始：${nextWave.name}。`);
   playSound("wave");
-  showToast(`第 ${state.wave} 波：${waves[state.wave - 1].name}`);
+  showToast(`第 ${state.wave} 波：${nextWave.name}`);
 }
 
 function spawnEnemy(item) {
-  const entry = ENTRIES[item.entry];
+  const entry = ENTRIES[resolveEntryIndex(item.entry)];
   const def = ENEMY_TYPES[item.type];
   const level = currentLevel();
   const start = { x: entry.x, y: entry.y };
@@ -2526,13 +2799,15 @@ function checkWaveEnd() {
   if (!state.activeWave) return;
   if (state.spawnQueue.length === 0 && state.enemies.length === 0) {
     state.activeWave = false;
-    const bonus = 22 + state.wave * 7;
+    const bonus = isEndlessMode() ? 24 + Math.floor(state.wave * 8 + Math.min(140, state.wave * 2.2)) : 22 + state.wave * 7;
     state.money += bonus;
     addLog(`第 ${state.wave} 波结束，回收战场资源 ¥${bonus}。`);
-    if (state.wave >= currentWaves().length) {
+    if (!isEndlessMode() && state.wave >= currentWaves().length) {
       addLog("全部波次清除，零域核心稳定。");
       showToast("胜利：核心稳定");
       finishLevel(true);
+    } else if (isEndlessMode()) {
+      showToast(`无尽第 ${state.wave} 波结束，奖励 ¥${bonus}`);
     } else {
       showToast(`第 ${state.wave} 波结束，奖励 ¥${bonus}`);
     }
@@ -2846,17 +3121,17 @@ function drawCoreAndEntries() {
 function nextWaveEntryIndexes() {
   const indexes = new Set();
   if (state.screen !== "playing" || state.activeWave || state.gameOver || state.won) return indexes;
-  const next = currentWaves()[state.wave];
+  const next = nextWaveDefinition();
   if (!next) return indexes;
-  next.packs.forEach((pack) => indexes.add(pack.entry));
+  next.packs.forEach((pack) => indexes.add(resolveEntryIndex(pack.entry)));
   return indexes;
 }
 
 function nextWaveEntrySummary(entryIndex) {
-  const next = currentWaves()[state.wave];
+  const next = nextWaveDefinition();
   if (!next) return "";
   return next.packs
-    .filter((pack) => pack.entry === entryIndex)
+    .filter((pack) => resolveEntryIndex(pack.entry) === entryIndex)
     .map((pack) => `${ENEMY_TYPES[pack.type].name}×${pack.count}`)
     .join(" / ");
 }
@@ -3524,15 +3799,14 @@ function drawOverlayMessage() {
 function renderUi() {
   const level = currentLevel();
   const map = currentMap();
-  const waves = currentWaves();
   document.body.classList.toggle("is-level-select", state.screen === "levelSelect");
   ui.levelSubtitle.textContent =
     state.screen === "levelSelect"
       ? `选择关卡和地图：${map.name}`
-      : `${level.name} / ${map.name} / ${level.difficulty}`;
+      : `${currentMode().name} / ${level.name} / ${map.name}`;
   ui.life.textContent = state.lives;
   ui.money.textContent = `¥${state.money}`;
-  ui.wave.textContent = `${state.wave} / ${waves.length}`;
+  ui.wave.textContent = `${state.wave} / ${waveGoalLabel(level)}`;
   ui.enemy.textContent = String(state.enemies.length + state.spawnQueue.length);
   ui.speed.textContent = `${state.speed}x`;
   ui.pause.textContent = state.paused ? "继续" : "暂停";
@@ -3559,7 +3833,7 @@ function renderUi() {
 }
 
 function renderLevelSelect() {
-  const keyValue = `${state.screen}:${state.entryStep}:${state.levelId}:${state.mapId}:${state.wave}:${state.towers.length}:${state.gameOver}:${state.won}`;
+  const keyValue = `${state.screen}:${state.entryStep}:${state.gameMode}:${state.levelId}:${state.mapId}:${state.wave}:${state.towers.length}:${state.gameOver}:${state.won}:${state.playerName}:${state.leaderboardVersion}`;
   if (uiCache.levelSelect === keyValue) return;
   uiCache.levelSelect = keyValue;
 
@@ -3589,10 +3863,17 @@ function renderLevelSelect() {
 
   const selectedLevel = currentLevel();
   const selectedMap = currentMap();
-  ui.startSelected.textContent = selectedLevel.id === "tutorial" ? "开始教学演练" : "开始作战";
+  const endless = isEndlessMode();
+  ui.startSelected.textContent = endless ? "开始无尽挑战" : selectedLevel.id === "tutorial" ? "开始教学演练" : "开始作战";
+  ui.skipTutorial.classList.toggle("hidden", endless);
+  ui.endlessNamePanel.classList.toggle("hidden", !endless);
+  if (ui.playerNameInput && document.activeElement !== ui.playerNameInput) {
+    ui.playerNameInput.value = state.playerName;
+  }
   ui.selectedLoadout.innerHTML = `
+    <span>模式 <strong>${escapeHtml(currentMode().name)}</strong></span>
     <span>难度 <strong>${escapeHtml(selectedLevel.name)}</strong></span>
-    <span>波次 <strong>${selectedLevel.waves.length}</strong></span>
+    <span>波次 <strong>${waveGoalLabel(selectedLevel)}</strong></span>
     <span>核心 <strong>${selectedLevel.lives}</strong></span>
     <span>资金 <strong>¥${selectedLevel.money}</strong></span>
     <span>地图 <strong>${escapeHtml(selectedMap.name)}</strong></span>
@@ -3605,6 +3886,15 @@ function renderLevelSelect() {
     </div>
     ${mapPreviewSvg(selectedMap)}
   `;
+  ui.confirmLeaderboard.classList.toggle("hidden", !endless);
+  if (endless) {
+    const board = getEndlessLeaderboard(selectedMap.id, selectedLevel.id);
+    ui.confirmLeaderboard.innerHTML = leaderboardHtml(board, {
+      title: leaderboardTitle(selectedMap.id, selectedLevel.id),
+    });
+  } else {
+    ui.confirmLeaderboard.innerHTML = "";
+  }
   ui.mapSpotlight.innerHTML = `
     ${mapPreviewSvg(selectedMap)}
     <div>
@@ -3616,10 +3906,27 @@ function renderLevelSelect() {
       <span>${selectedMap.entries.length} 入口</span>
       <span>核心 ${selectedMap.core.x + 1}-${selectedMap.core.y + 1}</span>
       <span>${escapeHtml(selectedMap.difficulty)}</span>
+      ${endless ? `<span>${escapeHtml(bestEndlessText(selectedMap.id, selectedLevel.id))}</span>` : ""}
     </div>
   `;
 
-  ui.levelCards.innerHTML = LEVELS.map((level) => {
+  ui.modeCards.innerHTML = GAME_MODE_ORDER.map((modeId) => {
+    const mode = GAME_MODES[modeId];
+    const isCurrent = mode.id === state.gameMode;
+    return `
+      <button class="mode-choice${isCurrent ? " is-current" : ""}" data-mode="${mode.id}">
+        <span class="screen-kicker">${escapeHtml(mode.badge)}</span>
+        <strong>${escapeHtml(mode.name)}</strong>
+        <p>${escapeHtml(mode.description)}</p>
+      </button>
+    `;
+  }).join("");
+
+  document.querySelectorAll(".mode-choice").forEach((button) => {
+    button.addEventListener("click", () => selectGameMode(button.dataset.mode));
+  });
+
+  ui.levelCards.innerHTML = playableLevels().map((level) => {
     const isCurrent = level.id === state.levelId;
     return `
       <button class="level-choice${isCurrent ? " is-current" : ""}" data-level="${level.id}">
@@ -3627,7 +3934,7 @@ function renderLevelSelect() {
         <strong>${escapeHtml(level.name)}</strong>
         <p>${escapeHtml(level.description)}</p>
         <div class="level-meta">
-          <span>${level.waves.length} 波</span>
+          <span>${endless ? "无限波" : `${level.waves.length} 波`}</span>
           <span>核心 ${level.lives}</span>
           <span>资金 ¥${level.money}</span>
           <span>${escapeHtml(level.difficulty)}</span>
@@ -3653,6 +3960,7 @@ function renderLevelSelect() {
           <span>核心 ${map.core.x + 1}-${map.core.y + 1}</span>
           <span>${escapeHtml(map.difficulty)}</span>
         </div>
+        ${endless ? `<span class="map-record">${escapeHtml(bestEndlessText(map.id, selectedLevel.id))}</span>` : ""}
       </button>
     `;
   }).join("");
@@ -3669,27 +3977,32 @@ function renderSettlement() {
     return;
   }
 
-  const keyValue = `${state.levelId}:${state.won}:${state.wave}:${state.lives}:${state.money}:${state.kills}:${state.leaks}`;
+  const resultId = state.endlessResult?.entry?.id || "";
+  const keyValue = `${state.gameMode}:${state.levelId}:${state.mapId}:${state.won}:${state.wave}:${state.lives}:${state.money}:${state.kills}:${state.leaks}:${resultId}:${state.leaderboardVersion}`;
   if (uiCache.settlement === keyValue) return;
   uiCache.settlement = keyValue;
 
   const level = currentLevel();
-  const waves = currentWaves();
   const elapsed = formatDuration((state.endedAt || performance.now()) - state.startedAt);
-  const score = Math.max(
-    0,
-    Math.round(state.wave * 120 + state.kills * 18 + state.lives * 45 + state.money + (state.won ? 520 : 0) - state.leaks * 35),
-  );
+  const score = battleScore();
   const next = nextLevelId();
-  ui.settlementBadge.textContent = state.won ? "结算 / 胜利" : "结算 / 失守";
-  ui.settlementTitle.textContent = state.won ? "防线稳定" : "防线失守";
-  ui.settlementSummary.textContent = state.won
-    ? `${level.name} / ${currentMap().name} 已清除。核心仍在运转，可以继续挑战下一关。`
-    : `${level.name} / ${currentMap().name} 推进到第 ${state.wave} 波。调整路线和升级节奏后再试一次。`;
+  const endless = isEndlessMode();
+  const endlessResult = state.endlessResult;
+  ui.settlementBadge.textContent = endless ? "结算 / 无尽" : state.won ? "结算 / 胜利" : "结算 / 失守";
+  ui.settlementTitle.textContent = endless ? "无尽挑战结束" : state.won ? "防线稳定" : "防线失守";
+  if (endless) {
+    const rankText = endlessResult?.madeBoard ? `本地榜第 ${endlessResult.rank} 名。` : "未进入本地前十。";
+    ui.settlementSummary.textContent = `${level.name} / ${currentMap().name} 坚持到第 ${state.wave} 波，${rankText}`;
+  } else {
+    ui.settlementSummary.textContent = state.won
+      ? `${level.name} / ${currentMap().name} 已清除。核心仍在运转，可以继续挑战下一关。`
+      : `${level.name} / ${currentMap().name} 推进到第 ${state.wave} 波。调整路线和升级节奏后再试一次。`;
+  }
   ui.settlementStats.innerHTML = `
+    <div><span>模式</span><strong>${currentMode().name}</strong></div>
     <div><span>关卡</span><strong>${level.name}</strong></div>
     <div><span>地图</span><strong>${currentMap().name}</strong></div>
-    <div><span>波次</span><strong>${state.wave} / ${waves.length}</strong></div>
+    <div><span>波次</span><strong>${state.wave} / ${waveGoalLabel(level)}</strong></div>
     <div><span>评分</span><strong>${score}</strong></div>
     <div><span>核心</span><strong>${state.lives}</strong></div>
     <div><span>击破</span><strong>${state.kills}</strong></div>
@@ -3697,13 +4010,26 @@ function renderSettlement() {
     <div><span>资金</span><strong>¥${state.money}</strong></div>
     <div><span>炮塔</span><strong>${state.towers.length}</strong></div>
     <div><span>用时</span><strong>${elapsed}</strong></div>
+    ${endless ? `<div><span>排名</span><strong>${endlessResult?.madeBoard ? `第 ${endlessResult.rank}` : "未上榜"}</strong></div>` : ""}
   `;
-  ui.settlementNext.disabled = !state.won || !next;
-  ui.settlementNext.textContent = next
-    ? state.won
-      ? `下一关：${levelById(next).name}`
-      : "通关后进入下一关"
-    : "没有下一关";
+  ui.settlementLeaderboard.classList.toggle("hidden", !endless);
+  if (endless) {
+    const board = getEndlessLeaderboard(state.mapId, state.levelId);
+    ui.settlementLeaderboard.innerHTML = leaderboardHtml(board, {
+      title: leaderboardTitle(state.mapId, state.levelId),
+      currentId: endlessResult?.entry?.id,
+    });
+  } else {
+    ui.settlementLeaderboard.innerHTML = "";
+  }
+  ui.settlementNext.disabled = endless || !state.won || !next;
+  ui.settlementNext.textContent = endless
+    ? "无尽没有下一关"
+    : next
+      ? state.won
+        ? `下一关：${levelById(next).name}`
+        : "通关后进入下一关"
+      : "没有下一关";
 }
 
 function renderCodex() {
@@ -4333,8 +4659,8 @@ function renderSelectedCard() {
 }
 
 function renderWavePreview() {
-  const next = currentWaves()[state.wave];
-  const keyValue = `preview:${state.levelId}:${state.mapId}:${state.wave}`;
+  const next = nextWaveDefinition();
+  const keyValue = `preview:${state.gameMode}:${state.levelId}:${state.mapId}:${state.wave}`;
   if (uiCache.preview === keyValue) return;
   uiCache.preview = keyValue;
   if (!next) {
@@ -4344,7 +4670,7 @@ function renderWavePreview() {
   ui.preview.innerHTML = next.packs
     .map((pack) => {
       const enemy = ENEMY_TYPES[pack.type];
-      const entry = ENTRIES[pack.entry];
+      const entry = ENTRIES[resolveEntryIndex(pack.entry)];
       return `
         <article class="wave-line">
           <i class="enemy-dot ${enemy.className}"></i>
@@ -4473,7 +4799,10 @@ ui.soundButton.addEventListener("click", toggleSound);
 ui.codexButton.addEventListener("click", () => openCodex("towers"));
 ui.levelSelectButton.addEventListener("click", openLevelSelect);
 ui.reset.addEventListener("click", resetGame);
-ui.startSelected.addEventListener("click", () => startLevel(state.levelId));
+ui.startSelected.addEventListener("click", () => {
+  if (isEndlessMode() && !commitPlayerName({ require: true })) return;
+  startLevel(state.levelId);
+});
 ui.entryBack.addEventListener("click", () => stepEntry(-1));
 ui.entryNext.addEventListener("click", () => stepEntry(1));
 ui.entryStepButtons.forEach((button) => {
@@ -4489,6 +4818,11 @@ ui.skipTutorial.addEventListener("click", () => {
 ui.levelSound.addEventListener("click", toggleSound);
 ui.levelCodex.addEventListener("click", () => openCodex("towers"));
 ui.resumeLevel.addEventListener("click", resumeCurrentLevel);
+ui.playerNameInput.addEventListener("input", () => {
+  state.playerName = normalizePlayerName(ui.playerNameInput.value);
+  savePlayerName(state.playerName);
+  uiCache.levelSelect = "";
+});
 ui.settlementRetry.addEventListener("click", () => startLevel(state.levelId));
 ui.settlementNext.addEventListener("click", () => {
   const next = nextLevelId();
@@ -4566,8 +4900,23 @@ function stepEntry(direction) {
   playSound("select");
 }
 
+function selectGameMode(modeId) {
+  if (!GAME_MODES[modeId] || state.gameMode === modeId) return;
+  state.gameMode = modeId;
+  if (state.gameMode === "endless" && state.levelId === "tutorial") {
+    state.levelId = "standard";
+  }
+  clearBattleForMapPreview();
+  closeQuickMenu();
+  resetUiCache();
+  playSound("select");
+  showToast(`已选择模式：${currentMode().name}`);
+  renderLevelSelect();
+}
+
 function selectLevel(levelId) {
   const level = levelById(levelId);
+  if (isEndlessMode() && level.id === "tutorial") return;
   if (state.levelId === level.id) return;
   state.levelId = level.id;
   clearBattleForMapPreview();
@@ -4642,6 +4991,7 @@ function startLevel(levelId, options = {}) {
     won: false,
     kills: 0,
     leaks: 0,
+    endlessResult: null,
     startedAt: performance.now(),
     endedAt: null,
     lastTime: performance.now(),
@@ -4652,10 +5002,11 @@ function startLevel(levelId, options = {}) {
   ui.levelSelect.classList.add("hidden");
   ui.settlement.classList.add("hidden");
   ui.codex.classList.add("hidden");
-  addLog(options.restart ? `${level.name} / ${currentMap().name} 重新开始。` : `${level.name} / ${currentMap().name} 开始。`);
-  if (level.id === "tutorial") addLog("教学演练不是必经流程，可以从关卡选择直接跳过。");
+  addLog(options.restart ? `${currentMode().name} / ${level.name} / ${currentMap().name} 重新开始。` : `${currentMode().name} / ${level.name} / ${currentMap().name} 开始。`);
+  if (isEndlessMode()) addLog("无尽挑战没有最终胜利，失守后会记录本地前十榜。");
+  if (!isEndlessMode() && level.id === "tutorial") addLog("教学演练不是必经流程，可以从关卡选择直接跳过。");
   playSound(options.restart ? "select" : "wave");
-  showToast(options.restart ? "重新开始" : `进入：${level.name}`);
+  showToast(options.restart ? "重新开始" : `进入：${currentMode().name}`);
   renderUi();
 }
 
@@ -4667,6 +5018,7 @@ function finishLevel(won) {
   state.spawnQueue = [];
   state.screen = "settlement";
   state.endedAt = performance.now();
+  state.endlessResult = isEndlessMode() ? recordEndlessScore() : null;
   closeQuickMenu();
   uiCache.settlement = "";
   playSound(won ? "victory" : "defeat");
