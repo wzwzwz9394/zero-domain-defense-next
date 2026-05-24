@@ -12,6 +12,8 @@ https://wzwzwz9394.github.io/zero-domain-defense-next/
 
 这个项目不需要后端服务器。仓库的 Settings -> Pages 已配置为 GitHub Actions，每次推送到 `main` 分支都会自动发布。
 
+后续玩法、美术、手感和平衡性改进都在这个 Next 项目上继续。
+
 ## 本地预览
 
 ```bash
