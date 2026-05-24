@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>零域方阵 Next</title>
+    <link rel="stylesheet" href="./styles.css?v=next-baseline-1" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark">零</div>
+          <div>
+            <h1>零域方阵 Next</h1>
+            <p id="levelSubtitle">自由造路塔防升级版</p>
+          </div>
+        </div>
+        <section class="stats" aria-label="战局状态">
+          <div><span>核心</span><strong id="lifeText">20</strong></div>
+          <div><span>资金</span><strong id="moneyText">180</strong></div>
+          <div><span>波次</span><strong id="waveText">0 / 12</strong></div>
+          <div><span>敌人</span><strong id="enemyText">0</strong></div>
+          <div><span>速度</span><strong id="speedText">1x</strong></div>
+        </section>
+      </header>
+
+      <section class="game-layout">
+        <aside class="tool-panel" aria-label="建造面板">
+          <div class="panel-section">
+            <h2>炮塔</h2>
+            <div class="tower-list">
+              <button class="tower-button is-active" data-tower="gun">
+                <b>1</b>
+                <span><strong>速射塔</strong><em>¥45 / 单体高速</em></span>
+              </button>
+              <button class="tower-button" data-tower="cannon">
+                <b>2</b>
+                <span><strong>重炮塔</strong><em>¥80 / 范围爆破</em></span>
+              </button>
+              <button class="tower-button" data-tower="ice">
+                <b>3</b>
+                <span><strong>冰霜塔</strong><em>¥65 / 减速控场</em></span>
+              </button>
+              <button class="tower-button" data-tower="pierce">
+                <b>4</b>
+                <span><strong>穿甲塔</strong><em>¥95 / 高伤穿透</em></span>
+              </button>
+              <button class="tower-button" data-tower="laser">
+                <b>5</b>
+                <span><strong>激光塔</strong><em>¥105 / 直线群伤</em></span>
+              </button>
+              <button class="tower-button" data-tower="shock">
+                <b>6</b>
+                <span><strong>冲击波塔</strong><em>¥90 / 范围眩晕</em></span>
+              </button>
+              <button class="tower-button" data-tower="aura">
+                <b>7</b>
+                <span><strong>光环塔</strong><em>¥115 / 阵地增益</em></span>
+              </button>
+            </div>
+          </div>
+
+          <div class="panel-section">
+            <h2>指令</h2>
+            <button id="startWaveButton" class="command-button primary">开始下一波</button>
+            <button id="pauseButton" class="command-button">暂停</button>
+            <button id="speedButton" class="command-button">切换速度</button>
+            <button id="soundButton" class="command-button">音效：开</button>
+            <button id="codexButton" class="command-button">图鉴</button>
+            <button id="levelSelectButton" class="command-button">关卡选择</button>
+            <button id="resetButton" class="command-button danger">重新开始</button>
+          </div>
+
+          <div class="panel-section selected-card" id="selectedCard">
+            <h2>当前选择</h2>
+            <p>选择炮塔后点击地图格子建造。炮塔会阻挡敌人路线，但不能完全堵死通往核心的路。</p>
+          </div>
+        </aside>
+
+        <section class="board-panel">
+          <div class="canvas-wrap">
+            <canvas id="gameCanvas" width="960" height="672" aria-label="零域方阵棋盘"></canvas>
+          </div>
+          <div class="hint-row">
+            <span>鼠标建塔 / 选塔</span>
+            <span>右键塔：升级 / 出售</span>
+            <span>1-7 切换炮塔</span>
+            <span>空格暂停</span>
+          </div>
+        </section>
+
+        <aside class="info-panel" aria-label="战术信息">
+          <div class="panel-section">
+            <h2>波次预告</h2>
+            <div id="wavePreview" class="wave-preview"></div>
+          </div>
+          <div class="panel-section">
+            <h2>战术记录</h2>
+            <div id="logList" class="log-list"></div>
+          </div>
+        </aside>
+      </section>
+    </main>
+
+    <section id="levelSelectOverlay" class="screen-overlay level-select-overlay" aria-label="关卡选择">
+      <div class="screen-panel level-select-panel">
+        <header class="entry-header">
+          <div class="entry-title">
+            <span class="screen-kicker">自由造路塔防</span>
+            <h2>零域方阵 Next</h2>
+            <p>先选难度，再选地图，最后确认作战。</p>
+          </div>
+          <div class="entry-tools">
+            <button id="levelSoundButton" class="command-button">音效：开</button>
+            <button id="levelCodexButton" class="command-button">图鉴</button>
+            <button id="resumeLevelButton" class="command-button hidden">继续战局</button>
+          </div>
+        </header>
+
+        <nav class="entry-steps" aria-label="开始流程">
+          <button class="entry-step-pill is-current" data-entry-step="difficulty">1 难度</button>
+          <button class="entry-step-pill" data-entry-step="map">2 地图</button>
+          <button class="entry-step-pill" data-entry-step="confirm">3 确认</button>
+        </nav>
+
+        <section id="difficultyStep" class="entry-step entry-step-difficulty" aria-label="选择难度">
+          <div class="entry-page-heading">
+            <span>第 1 步</span>
+            <h3>选择关卡难度</h3>
+            <p>教学演练只是可选练习；想直接玩，选标准防线即可。</p>
+          </div>
+          <div id="levelCards" class="level-grid entry-level-grid" aria-label="关卡列表"></div>
+          <div class="entry-note">
+            <button id="skipTutorialButton" class="text-command">跳过教学，使用标准防线</button>
+          </div>
+        </section>
+
+        <section id="mapStep" class="entry-step entry-step-map hidden" aria-label="选择地图">
+          <div class="entry-page-heading">
+            <span>第 2 步</span>
+            <h3>选择地图战区</h3>
+            <p>20 张地图全部铺开。卡片只放地图形状和关键参数，详细说明放在下方。</p>
+          </div>
+          <div id="mapCards" class="map-grid entry-map-grid" aria-label="地图列表"></div>
+          <div id="mapSpotlight" class="map-spotlight entry-map-detail" aria-label="选中地图详情"></div>
+        </section>
+
+        <section id="confirmStep" class="entry-step entry-step-confirm hidden" aria-label="确认作战">
+          <div class="entry-page-heading">
+            <span>第 3 步</span>
+            <h3>确认作战配置</h3>
+            <p>确认难度和地图后进入战场，建塔和波次控制会在下一屏展开。</p>
+          </div>
+          <div class="entry-confirm-layout">
+            <div class="entry-confirm-card">
+              <h4>本局配置</h4>
+              <div class="landing-meta" id="selectedLoadout"></div>
+            </div>
+            <div class="landing-preview" id="selectedMapPreview" aria-label="当前地图预览"></div>
+          </div>
+        </section>
+
+        <footer class="entry-footer">
+          <button id="entryBackButton" class="command-button">上一步</button>
+          <button id="entryNextButton" class="command-button primary">下一步</button>
+          <button id="startSelectedButton" class="command-button primary hidden">开始作战</button>
+        </footer>
+      </div>
+    </section>
+
+    <section id="settlementOverlay" class="screen-overlay hidden" aria-label="结算面板">
+      <div class="screen-panel settlement-panel">
+        <span id="settlementBadge" class="screen-kicker">结算</span>
+        <h2 id="settlementTitle">战局结束</h2>
+        <p id="settlementSummary"></p>
+        <div id="settlementStats" class="settlement-stats"></div>
+        <div class="screen-actions">
+          <button id="settlementRetryButton" class="command-button primary">重玩本关</button>
+          <button id="settlementNextButton" class="command-button">下一关</button>
+          <button id="settlementSelectButton" class="command-button">返回关卡选择</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="codexOverlay" class="screen-overlay hidden" aria-label="战术图鉴">
+      <div class="screen-panel codex-panel">
+        <div class="screen-heading">
+          <span class="screen-kicker">战术图鉴</span>
+          <h2>炮塔与敌人</h2>
+        </div>
+        <div class="codex-tabs" role="tablist" aria-label="图鉴分类">
+          <button id="towerCodexTab" class="is-active" data-codex-tab="towers" role="tab">炮塔</button>
+          <button id="enemyCodexTab" data-codex-tab="enemies" role="tab">敌人</button>
+        </div>
+        <div id="codexViewControls" class="codex-view-controls" role="group" aria-label="图鉴显示方式">
+          <button class="is-active" data-codex-view="summary">简略</button>
+          <button data-codex-view="detail">详细</button>
+        </div>
+        <div id="codexContent" class="codex-grid"></div>
+        <div class="screen-actions">
+          <button id="codexCloseButton" class="command-button primary">返回</button>
+        </div>
+      </div>
+    </section>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="./game.js?v=next-baseline-1"></script>
+  </body>
+</html>
