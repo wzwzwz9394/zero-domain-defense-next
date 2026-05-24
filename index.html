@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>零域方阵 Next</title>
-    <link rel="stylesheet" href="./styles.css?v=next-baseline-1" />
+    <link rel="stylesheet" href="./styles.css?v=next-endless-1" />
   </head>
   <body>
     <main class="app-shell">
@@ -119,7 +119,7 @@
         </header>
 
         <nav class="entry-steps" aria-label="开始流程">
-          <button class="entry-step-pill is-current" data-entry-step="difficulty">1 难度</button>
+          <button class="entry-step-pill is-current" data-entry-step="difficulty">1 模式</button>
           <button class="entry-step-pill" data-entry-step="map">2 地图</button>
           <button class="entry-step-pill" data-entry-step="confirm">3 确认</button>
         </nav>
@@ -127,9 +127,10 @@
         <section id="difficultyStep" class="entry-step entry-step-difficulty" aria-label="选择难度">
           <div class="entry-page-heading">
             <span>第 1 步</span>
-            <h3>选择关卡难度</h3>
-            <p>教学演练只是可选练习；想直接玩，选标准防线即可。</p>
+            <h3>选择模式和强度</h3>
+            <p>普通防守负责固定波次练习；无尽挑战才会记录昵称和本地排行榜。</p>
           </div>
+          <div id="modeCards" class="entry-mode-grid" aria-label="模式列表"></div>
           <div id="levelCards" class="level-grid entry-level-grid" aria-label="关卡列表"></div>
           <div class="entry-note">
             <button id="skipTutorialButton" class="text-command">跳过教学，使用标准防线</button>
@@ -156,8 +157,15 @@
             <div class="entry-confirm-card">
               <h4>本局配置</h4>
               <div class="landing-meta" id="selectedLoadout"></div>
+              <div id="endlessNamePanel" class="endless-name-panel hidden">
+                <label for="playerNameInput">无尽榜昵称</label>
+                <input id="playerNameInput" class="nickname-input" type="text" maxlength="12" autocomplete="nickname" placeholder="输入 2-12 个字" />
+              </div>
             </div>
-            <div class="landing-preview" id="selectedMapPreview" aria-label="当前地图预览"></div>
+            <div class="entry-confirm-side">
+              <div class="landing-preview" id="selectedMapPreview" aria-label="当前地图预览"></div>
+              <div id="confirmLeaderboard" class="leaderboard-panel hidden" aria-label="无尽排行榜"></div>
+            </div>
           </div>
         </section>
 
@@ -175,6 +183,7 @@
         <h2 id="settlementTitle">战局结束</h2>
         <p id="settlementSummary"></p>
         <div id="settlementStats" class="settlement-stats"></div>
+        <div id="settlementLeaderboard" class="leaderboard-panel settlement-leaderboard hidden" aria-label="无尽结算排行榜"></div>
         <div class="screen-actions">
           <button id="settlementRetryButton" class="command-button primary">重玩本关</button>
           <button id="settlementNextButton" class="command-button">下一关</button>
@@ -205,6 +214,6 @@
     </section>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="./game.js?v=next-baseline-1"></script>
+    <script src="./game.js?v=next-endless-1"></script>
   </body>
 </html>
